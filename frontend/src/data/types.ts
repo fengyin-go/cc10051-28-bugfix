@@ -27,9 +27,20 @@ export type PageResult = {
   size: number
 }
 
+export type ActionReceipt = {
+  动作: string
+  办理结果: string
+  终态: string
+  确认回执?: string
+  说明: string
+  [field: string]: string | number | boolean | undefined
+}
+
 export type ActionResult = {
   ok: boolean
   message: string
+  receipt?: ActionReceipt | null
+  action?: string | null
 }
 
 export type OverviewResult = {

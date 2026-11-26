@@ -90,6 +90,28 @@
       <span>共 {{ total }} 条{{ meta.name }}记录</span>
       <span v-if="errorMessage" class="error-text">{{ errorMessage }}</span>
     </footer>
+
+    <section
+      v-if="lastReceipt"
+      class="receipt-panel"
+      :data-testid="'receipt'"
+      :data-ok="String(lastReceipt.ok)"
+      :data-terminal="lastReceipt.receipt?.终态 ?? ''"
+    >
+      <h3>最近一次操作的服务端确认回执</h3>
+      <dl class="receipt-detail">
+        <dt>动作</dt>
+        <dd>{{ lastReceipt.receipt?.动作 ?? lastReceipt.action ?? '—' }}</dd>
+        <dt>办理结果</dt>
+        <dd>{{ lastReceipt.receipt?.办理结果 ?? (lastReceipt.ok ? '已办理' : '未受理') }}</dd>
+        <dt>终态</dt>
+        <dd>{{ lastReceipt.receipt?.终态 ?? '—' }}</dd>
+        <dt>确认回执</dt>
+        <dd>{{ lastReceipt.receipt?.确认回执 || '—' }}</dd>
+        <dt>说明</dt>
+        <dd>{{ lastReceipt.message }}</dd>
+      </dl>
+    </section>
   </section>
 </template>
 
@@ -103,15 +125,17 @@ import {
   moduleMeta,
   runAction as applyAction,
 } from '@/api/backend-service'
-import type { EntryRow } from '@/data/types'
+import type { ActionResult, EntryRow } from '@/data/types'
 
 const props = defineProps<{ moduleKey: string }>()
 const meta = moduleMeta(props.moduleKey)
 const rows = ref<EntryRow[]>([])
 const total = ref(0)
 const errorMessage = ref('')
-const filters = ref<Record<string, string>>({})
+const lastReceipt = ref<ActionResult | null>(null)
 const filterFields = meta.fields.slice(0, 3)
+const filters = ref<Record<string, string>>({})
+const REASON_ACTIONS = new Set(['取消任务', '回滚批次', '标记差异', '重试分发', '发布批次'])
 const showCreate = ref(false)
 const creating = ref(false)
 const createValues = ref<Record<string, string>>({})
@@ -167,9 +191,17 @@ async function submitCreate() {
 
 async function runAction(action: string, row: EntryRow) {
   errorMessage.value = ''
+  lastReceipt.value = null
   try {
-    const result = await applyAction(meta.key, Number(row.id), action)
-    if (!result.ok) throw new Error(result.message)
+    const remark = REASON_ACTIONS.has(action)
+      ? window.prompt(`请填写「${action}」的依据/原因`, '') ?? ''
+      : ''
+    const result = await applyAction(meta.key, Number(row.id), action, remark || undefined)
+    // 页面按服务端确认结果展示终态回执，未受理的动作同样保留可追查回执。
+    lastReceipt.value = result
+    if (!result.ok) {
+      errorMessage.value = result.message
+    }
     await reload()
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '操作失败'

@@ -71,6 +71,28 @@ class BaseModuleService:
         entry["abnormal"] = action in self.NEGATIVE_ACTIONS
         return entry, f"{self.ENTITY}已{action}"
 
+    def perform_action(
+        self, entry_id: int, action: str, remark: str | None = None
+    ) -> dict[str, Any]:
+        """统一动作入口：返回服务端确认结果，供页面按终态展示可追查回执。
+
+        默认走配置好的状态流转；领域服务可以覆写本方法，对执行/取消等
+        相互冲突的入口做资格校验并返回明确的终态回执。
+        """
+        entry, message = self.run_action(entry_id, action)
+        return {
+            "ok": entry is not None,
+            "message": message,
+            "entry": entry,
+            "receipt": {
+                "动作": action,
+                "办理结果": "已办理" if entry is not None else "未受理",
+                "终态": entry.get("status") if entry is not None else "",
+                "说明": message,
+            },
+            "action": action,
+        }
+
     def domain_snapshot(self) -> dict[str, Any]:
         """输出模块级数据质量快照，供跨模块消费和题位源码锚点使用。"""
         rows = store.rows(self.MODULE)

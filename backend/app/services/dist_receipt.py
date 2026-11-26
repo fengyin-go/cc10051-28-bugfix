@@ -25,10 +25,18 @@ class DistReceiptService(BaseModuleService):
     # ---- 业务扩展：回执核对与差异处置 ----
 
     def verify_receipt(self, entry_id: int) -> dict[str, Any]:
-        """核对回执：按分发批次校验记录数一致性。"""
+        """核对回执：回滚终态回执按已确定的登记结算，其余按分发批次校验。"""
         entry = store.find(self.MODULE, entry_id)
         if entry is None:
             return {"ok": False, "message": "回执记录不存在"}
+        terminal = self._rollback_terminal(entry)
+        if terminal is not None:
+            # 撤回/取消/失败回执是终态事实：再次到达只回放登记，不改写状态。
+            return {
+                "ok": True,
+                "message": f"回滚终态回执 {entry.get('回执编号', '')} 已存在，按已确定的 {terminal} 登记结算",
+                "receipt": self._receipt(entry, "核对回执", True, terminal),
+            }
         batch = entry.get("分发批次", "")
         task = next((t for t in store.rows("dist_task")
                      if t.get("分发批次") == batch), None)
@@ -44,11 +52,19 @@ class DistReceiptService(BaseModuleService):
         entry["差异说明"] = f"分发状态为 {task.get('status')}"
         return {"ok": False, "message": "回执与分发结果不一致"}
 
-    def mark_diff(self, entry_id: int, diff: str) -> str:
-        """标记回执差异并把分发任务置为失败重试。"""
+    def mark_diff(self, entry_id: int, diff: str) -> dict[str, Any]:
+        """标记回执差异；撤回回执不能被后来的取消或差异标记抹掉。"""
         entry = store.find(self.MODULE, entry_id)
         if entry is None:
-            return "回执记录不存在"
+            return {"ok": False, "message": "回执记录不存在"}
+        terminal = self._rollback_terminal(entry)
+        if terminal is not None:
+            return {
+                "ok": False,
+                "message": f"回执 {entry.get('回执编号', '')} 是已确定的 {terminal} 终态回执，"
+                "差异标记未获处理资格，撤回回执保持不变",
+                "receipt": self._receipt(entry, "标记差异", False, terminal),
+            }
         entry["status"] = "未回收"
         entry["差异说明"] = diff
         entry["abnormal"] = True
@@ -57,13 +73,54 @@ class DistReceiptService(BaseModuleService):
             if task.get("分发批次") == batch:
                 task["status"] = "分发失败"
                 task["abnormal"] = True
-        return f"差异已标记: {diff}"
+        return {"ok": True, "message": f"差异已标记: {diff}"}
+
+    def perform_action(
+        self, entry_id: int, action: str, remark: str | None = None
+    ) -> dict[str, Any]:
+        if action == "标记差异":
+            return self.mark_diff(entry_id, remark or "订阅方回执与分发结果不一致")
+        if action == "重发回执请求":
+            return self.resend_request(entry_id)
+        return super().perform_action(entry_id, action, remark)
+
+    def _rollback_terminal(self, entry: dict[str, Any]) -> dict[str, Any] | None:
+        """识别回滚终态回执：撤回确认 / 取消 / 失败三类分别保留。"""
+        code = str(entry.get("回执编号", ""))
+        terminal = str(entry.get("终态", ""))
+        if code.startswith(("rbr-", "rbc-", "rbf-")) or terminal in ("已生效", "已取消", "回滚失败"):
+            if not terminal:
+                if code.startswith("rbr-"):
+                    terminal = "已生效"
+                elif code.startswith("rbc-"):
+                    terminal = "已取消"
+                else:
+                    terminal = "回滚失败"
+            return terminal
+        return None
+
+    def _receipt(
+        self, entry: dict[str, Any], action: str, accepted: bool, terminal: str
+    ) -> dict[str, Any]:
+        return {
+            "动作": action,
+            "办理结果": "已办理" if accepted else "未受理",
+            "终态": terminal,
+            "确认回执": str(entry.get("回执编号", "")),
+            "说明": str(entry.get("差异说明", "")),
+        }
 
     def resend_request(self, entry_id: int) -> dict[str, Any]:
-        """重发回执请求并等待订阅方回传。"""
+        """重发回执请求并等待订阅方回传；撤回回执不重发。"""
         entry = store.find(self.MODULE, entry_id)
         if entry is None:
             return {"ok": False, "message": "回执记录不存在"}
+        if self._rollback_terminal(entry) is not None:
+            return {
+                "ok": False,
+                "message": "撤回终态回执不可重发，已确定内容保持不变",
+                "receipt": self._receipt(entry, "重发回执请求", False, "已生效"),
+            }
         entry["status"] = "部分回收"
         entry["pending"] = True
         entry["重发时间"] = datetime.now(timezone.utc).isoformat()
